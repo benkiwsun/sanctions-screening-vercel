@@ -42,6 +42,12 @@ ENSURE_COLS = ["Aliases", "Programs", "Country", "Source_Agency", "Type", "Detai
 NORM_COLS = ["Name", "Aliases", "Programs", "Country", "Source_Agency", "Type", "Details", "IMO", "MMSI"]
 OUTPUT_COLS = ["Score", "Name", "Aliases", "IMO", "MMSI", "Source_Agency", "Programs", "Country", "Type", "Details"]
 
+# Only these columns are needed at runtime. Reading a subset keeps the ~33 MB /
+# 100k-row global database well within the serverless memory budget and speeds
+# up the cold-start parse. Unlisted columns (Remarks, Addresses, UID, ...) are
+# skipped.
+USECOLS = {"Name", "Aliases", "Type", "Programs", "Country", "Details", "IMO", "MMSI", "Source_Agency"}
+
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 
@@ -105,11 +111,15 @@ def _local_path(file_name: str) -> Optional[Path]:
 # =========================
 # 1) Data loading (local file first, GitHub fallback)
 # =========================
+def _usecols(col: str) -> bool:
+    return col in USECOLS
+
+
 def _fetch_csv(file_name: str, url: str) -> pd.DataFrame:
     local = _local_path(file_name)
     if local is not None:
         try:
-            return pd.read_csv(local, dtype=str, low_memory=False)
+            return pd.read_csv(local, dtype=str, low_memory=False, usecols=_usecols)
         except Exception:
             pass
     try:
@@ -120,7 +130,7 @@ def _fetch_csv(file_name: str, url: str) -> pd.DataFrame:
             return pd.DataFrame()
         from io import BytesIO
 
-        return pd.read_csv(BytesIO(resp.content), dtype=str, low_memory=False)
+        return pd.read_csv(BytesIO(resp.content), dtype=str, low_memory=False, usecols=_usecols)
     except Exception:
         return pd.DataFrame()
 
@@ -163,12 +173,19 @@ _DF_LOCK = threading.Lock()
 
 
 def get_dataframe() -> pd.DataFrame:
-    """Lazily build & cache the merged DataFrame (thread-safe)."""
+    """Lazily build & cache the merged DataFrame (thread-safe).
+
+    Never raises: on any failure it returns (and caches) an empty DataFrame so
+    the API degrades gracefully instead of returning HTTP 500.
+    """
     global _DF
     if _DF is None:
         with _DF_LOCK:
             if _DF is None:
-                _DF = _build_dataframe()
+                try:
+                    _DF = _build_dataframe()
+                except Exception:
+                    _DF = pd.DataFrame(columns=NORM_COLS + ["__search_text"])
     return _DF
 
 

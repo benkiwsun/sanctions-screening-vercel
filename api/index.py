@@ -6,9 +6,18 @@ loaded lazily and cached for the lifetime of the warm serverless instance.
 
 from __future__ import annotations
 
+import os
+import sys
+
+# Ensure this file's directory (the `api/` folder) is importable regardless of
+# how the runtime loads the entrypoint. On Vercel the module is imported as a
+# package, so a bare `import screening` would otherwise raise ModuleNotFoundError
+# and return HTTP 500 on every request.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -21,7 +30,7 @@ from screening import (
 
 app = FastAPI(title="Sanctions Screening API", version="1.0.0")
 
-# Same-origin in production; permissive for local `vercel dev` / Next dev proxy.
+# Same-origin in production; permissive for local dev / proxy.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,6 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+router = APIRouter()
 
 
 class ScreenRequest(BaseModel):
@@ -49,7 +60,7 @@ class ScreenResult(BaseModel):
     sync_time: str
 
 
-@app.get("/api/health")
+@router.get("/health")
 def health() -> Dict[str, Any]:
     df = get_dataframe()
     return {
@@ -59,7 +70,7 @@ def health() -> Dict[str, Any]:
     }
 
 
-@app.get("/api/stats")
+@router.get("/stats")
 def stats() -> Dict[str, Any]:
     df = get_dataframe()
     return {
@@ -69,12 +80,21 @@ def stats() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/screen", response_model=ScreenResult)
+@router.post("/screen", response_model=ScreenResult)
 def screen_endpoint(req: ScreenRequest) -> Dict[str, Any]:
     return screen(req.query, req.threshold)
 
 
-# Convenience root so a bare GET /api doesn't 404.
-@app.get("/api")
+@router.get("/")
 def root() -> Dict[str, str]:
-    return {"service": "sanctions-screening-api", "docs": "/api/health, /api/stats, POST /api/screen"}
+    return {
+        "service": "sanctions-screening-api",
+        "docs": "GET /api/health, GET /api/stats, POST /api/screen",
+    }
+
+
+# Mount the routes both under /api/* (matches the frontend + vercel.json rewrite)
+# and at the root, so the function works whether or not the platform strips the
+# /api prefix before invoking it.
+app.include_router(router, prefix="/api")
+app.include_router(router)
